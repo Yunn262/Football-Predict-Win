@@ -32,10 +32,11 @@ st.caption("Dados reais do Sofascore | Análise com IA simplificada | Bilhetes i
 with st.sidebar:
     st.header("⚙️ Configurações")
     data_selecionada = st.date_input(
-        "Data dos jogos",
+        "Data dos jogos (Análise)",
         value=datetime.now().date(),
         min_value=datetime.now().date() - timedelta(days=7),
-        max_value=datetime.now().date() + timedelta(days=7)
+        max_value=datetime.now().date() + timedelta(days=7),
+        key="data_analise"
     )
     st.divider()
     st.info("🔄 Atualização automática a cada 5 min")
@@ -76,59 +77,17 @@ def analisar_jogos_do_dia(date_str: str):
     return resultados
 
 # ============================================================
-# OBTER DADOS DO DIA
+# OBTER DADOS DO DIA (PARA ANÁLISE)
 # ============================================================
 date_str = data_selecionada.strftime("%Y-%m-%d")
 resultados = analisar_jogos_do_dia(date_str)
 
-if not resultados:
-    st.warning("Nenhum jogo encontrado ou erro na recolha de dados.")
-    st.stop()
-
-# ============================================================
-# GUARDAR PREVISÕES NA BASE DE DADOS
-# ============================================================
-for r in resultados:
-    for p in r['previsoes']:
-        database.salvar_previsao(
-            data_jogo=date_str,
-            jogo=f"{r['home_team']} vs {r['away_team']}",
-            mercado=p['mercado'],
-            selecao=p['selecao'],
-            probabilidade=p['probabilidade'],
-            odd=p.get('odd'),
-            pontuacao=p['pontuacao'],
-            confianca_jogo=r['confianca_geral']
-        )
-
-# ============================================================
-# GERAR BILHETES
-# ============================================================
-bilhete_normal = gerar_bilhete(resultados)
-if bilhete_normal:
-    database.salvar_bilhete(
-        data_bilhete=date_str,
-        selecoes=bilhete_normal['selecoes'],
-        odd_total=bilhete_normal.get('odd_total'),
-        confianca_media=bilhete_normal['confianca_media'],
-        tipo="normal"
-    )
-
-montagens = gerar_montagens_inteligentes(resultados)
-for m in montagens:
-    database.salvar_bilhete(
-        data_bilhete=date_str,
-        selecoes=m['selecoes'],
-        odd_total=m.get('odd_total'),
-        confianca_media=m['confianca_media'],
-        tipo=m['nome']
-    )
-
 # ============================================================
 # INTERFACE COM ABAS
 # ============================================================
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Análise",
+    "🔎 Pesquisa",
     "🎟️ Bilhete do Dia",
     "💎 Montagens Inteligentes",
     "📜 Histórico"
@@ -138,50 +97,154 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.subheader(f"Jogos de {date_str} (total: {len(resultados)})")
 
-    # Tabela resumo
-    rows = []
-    for r in resultados:
-        top3 = r['previsoes'][:3]
-        texto_top = " | ".join([
-            f"{p['mercado']}: {p['selecao']} ({p['probabilidade']:.0%})"
-            for p in top3
-        ])
-        rows.append({
-            "Jogo": f"{r['home_team']} vs {r['away_team']}",
-            "Torneio": r.get('tournament', ''),
-            "Hora": r.get('start_time', ''),
-            "xG Casa": r['xg_casa'],
-            "xG Fora": r['xg_fora'],
-            "Confiança": f"{r['confianca_geral']}%",
-            "Top 3 Palpites": texto_top
-        })
+    if not resultados:
+        st.warning("Nenhum jogo encontrado ou erro na recolha de dados.")
+    else:
+        # Guardar previsões na base de dados
+        for r in resultados:
+            for p in r['previsoes']:
+                database.salvar_previsao(
+                    data_jogo=date_str,
+                    jogo=f"{r['home_team']} vs {r['away_team']}",
+                    mercado=p['mercado'],
+                    selecao=p['selecao'],
+                    probabilidade=p['probabilidade'],
+                    odd=p.get('odd'),
+                    pontuacao=p['pontuacao'],
+                    confianca_jogo=r['confianca_geral']
+                )
 
-    df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+        # Tabela resumo
+        rows = []
+        for r in resultados:
+            top3 = r['previsoes'][:3]
+            texto_top = " | ".join([
+                f"{p['mercado']}: {p['selecao']} ({p['probabilidade']:.0%})"
+                for p in top3
+            ])
+            rows.append({
+                "Jogo": f"{r['home_team']} vs {r['away_team']}",
+                "Torneio": r.get('tournament', ''),
+                "Hora": r.get('start_time', ''),
+                "xG Casa": r['xg_casa'],
+                "xG Fora": r['xg_fora'],
+                "Confiança": f"{r['confianca_geral']}%",
+                "Top 3 Palpites": texto_top
+            })
 
-    st.divider()
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Detalhes expandidos por jogo
-    for r in resultados:
-        with st.expander(f"⚽ {r['home_team']} vs {r['away_team']} (Confiança: {r['confianca_geral']}%)"):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown(f"**Torneio:** {r.get('tournament', 'N/A')}")
-                st.markdown(f"**Hora:** {r.get('start_time', 'N/A')}")
-                st.markdown(f"**xG Casa:** {r['xg_casa']}")
-                st.markdown(f"**xG Fora:** {r['xg_fora']}")
-            with col2:
-                st.markdown("**Palpites:**")
-                for p in r['previsoes']:
-                    odd_text = f" (Odd: {p['odd']})" if p.get('odd') else ""
-                    st.markdown(
-                        f"- {p['mercado']}: **{p['selecao']}** "
-                        f"({p['probabilidade']:.0%}){odd_text} | Pontuação: {p['pontuacao']:.1f}"
-                    )
+        st.divider()
 
-# ---------- ABA 2: BILHETE DO DIA ----------
+        # Detalhes expandidos por jogo
+        for r in resultados:
+            with st.expander(f"⚽ {r['home_team']} vs {r['away_team']} (Confiança: {r['confianca_geral']}%)"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**Torneio:** {r.get('tournament', 'N/A')}")
+                    st.markdown(f"**Hora:** {r.get('start_time', 'N/A')}")
+                    st.markdown(f"**xG Casa:** {r['xg_casa']}")
+                    st.markdown(f"**xG Fora:** {r['xg_fora']}")
+                with col2:
+                    st.markdown("**Palpites:**")
+                    for p in r['previsoes']:
+                        odd_text = f" (Odd: {p['odd']})" if p.get('odd') else ""
+                        st.markdown(
+                            f"- {p['mercado']}: **{p['selecao']}** "
+                            f"({p['probabilidade']:.0%}){odd_text} | Pontuação: {p['pontuacao']:.1f}"
+                        )
+
+# ---------- ABA 2: PESQUISA DE JOGO ----------
 with tab2:
+    st.subheader("🔎 Pesquisar Jogo")
+    st.caption("Indica as duas equipas e a data para obter as probabilidades calculadas pela IA.")
+
+    col_search1, col_search2 = st.columns(2)
+    with col_search1:
+        equipa_casa = st.text_input("Equipa da Casa", placeholder="Ex: Barcelona", key="equipa_casa")
+    with col_search2:
+        equipa_fora = st.text_input("Equipa de Fora", placeholder="Ex: Real Madrid", key="equipa_fora")
+
+    data_pesquisa = st.date_input(
+        "Data do jogo",
+        value=datetime.now().date(),
+        min_value=datetime.now().date() - timedelta(days=7),
+        max_value=datetime.now().date() + timedelta(days=7),
+        key="data_pesquisa"
+    )
+
+    pesquisar = st.button("Pesquisar Jogo", type="primary", key="btn_pesquisar")
+
+    if pesquisar:
+        if not equipa_casa or not equipa_fora:
+            st.warning("⚠️ Indica o nome das duas equipas.")
+        else:
+            with st.spinner("A pesquisar jogo..."):
+                date_str_pesq = data_pesquisa.strftime("%Y-%m-%d")
+                api = SofascoreAPI()
+                eventos = api.get_scheduled_events(date_str_pesq)
+
+                if not eventos:
+                    st.warning("Nenhum evento encontrado para essa data.")
+                else:
+                    evento_encontrado = None
+                    for ev in eventos:
+                        home_lower = ev['home_team'].lower()
+                        away_lower = ev['away_team'].lower()
+                        if equipa_casa.lower() in home_lower and equipa_fora.lower() in away_lower:
+                            evento_encontrado = ev
+                            break
+
+                    if not evento_encontrado:
+                        st.warning("❌ Jogo não encontrado. Verifica os nomes e a data.")
+                    else:
+                        st.success(f"✅ Jogo encontrado: {evento_encontrado['home_team']} vs {evento_encontrado['away_team']}")
+
+                        dados = api.prepare_match_data(evento_encontrado['event_id'])
+                        if not dados:
+                            st.error("Não foi possível obter dados detalhados do jogo.")
+                        else:
+                            analise = analisar_jogo(dados)
+
+                            col_xg1, col_xg2 = st.columns(2)
+                            with col_xg1:
+                                st.metric("xG Casa", f"{analise['xg_casa']:.2f}")
+                            with col_xg2:
+                                st.metric("xG Fora", f"{analise['xg_fora']:.2f}")
+
+                            st.markdown("---")
+                            st.markdown("### 📊 Probabilidades Calculadas")
+
+                            for p in analise['previsoes']:
+                                prob = min(float(p['probabilidade']), 1.0)
+                                odd_text = f" | Odd: {p['odd']}" if p.get('odd') else ""
+                                st.markdown(f"**{p['mercado']}**: {p['selecao']} → {p['probabilidade']:.0%}{odd_text}")
+                                st.progress(prob)
+
+                            melhor = analise['previsoes'][0] if analise['previsoes'] else None
+                            if melhor:
+                                st.success(
+                                    f"💡 **Melhor mercado sugerido:** "
+                                    f"{melhor['mercado']} - {melhor['selecao']} "
+                                    f"({melhor['probabilidade']:.0%}) | Pontuação: {melhor['pontuacao']:.1f}"
+                                )
+
+# ---------- ABA 3: BILHETE DO DIA ----------
+with tab3:
     st.subheader("🎟️ Bilhete do Dia (Normal)")
+    bilhete_normal = None
+    if resultados:
+        bilhete_normal = gerar_bilhete(resultados)
+        if bilhete_normal:
+            database.salvar_bilhete(
+                data_bilhete=date_str,
+                selecoes=bilhete_normal['selecoes'],
+                odd_total=bilhete_normal.get('odd_total'),
+                confianca_media=bilhete_normal['confianca_media'],
+                tipo="normal"
+            )
+
     if bilhete_normal:
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -198,11 +261,23 @@ with tab2:
             else:
                 st.info("Sem odds disponíveis")
     else:
-        st.info("Não foi possível gerar um bilhete com os dados atuais.")
+        st.info("Não foi possível gerar um bilhete. Verifica se há jogos analisados.")
 
-# ---------- ABA 3: MONTAGENS INTELIGENTES ----------
-with tab3:
+# ---------- ABA 4: MONTAGENS INTELIGENTES ----------
+with tab4:
     st.subheader("💎 Montagens Inteligentes")
+    montagens = []
+    if resultados:
+        montagens = gerar_montagens_inteligentes(resultados)
+        for m in montagens:
+            database.salvar_bilhete(
+                data_bilhete=date_str,
+                selecoes=m['selecoes'],
+                odd_total=m.get('odd_total'),
+                confianca_media=m['confianca_media'],
+                tipo=m['nome']
+            )
+
     if montagens:
         for m in montagens:
             with st.expander(f"{m['nome']} ({m['num_selecoes']} seleções, conf. média {m['confianca_media']}%)"):
@@ -219,8 +294,8 @@ with tab3:
     else:
         st.info("Sem montagens disponíveis com os critérios atuais.")
 
-# ---------- ABA 4: HISTÓRICO ----------
-with tab4:
+# ---------- ABA 5: HISTÓRICO ----------
+with tab5:
     st.subheader("📜 Histórico de Previsões e Bilhetes")
     col_prev, col_bil = st.columns(2)
 
@@ -247,7 +322,6 @@ with tab4:
                     if b['odd_total']:
                         st.markdown(f"**Odd Total:** {b['odd_total']:.2f}")
 
-                    # Atualizar status do bilhete
                     opcoes_status = ["pendente", "ganho", "perdido"]
                     indice_atual = opcoes_status.index(b['status']) if b['status'] in opcoes_status else 0
                     novo_status = st.selectbox(
