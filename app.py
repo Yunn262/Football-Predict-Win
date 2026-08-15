@@ -1,298 +1,229 @@
-# scraper.py
-"""
-Módulo de recolha de dados da AllSportsAPI (API oficial de futebol).
-Substitui o scraper do Sofascore.
-"""
-
-import requests
+# app.py
+import streamlit as st
+import pandas as pd
 import json
-import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from streamlit_autorefresh import st_autorefresh
 
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
-API_KEY = "97136b858bff84845d6e6f2bad6a75679eb11e657682e951af497bd3434640a6"  # ← COLOCA AQUI A TUA CHAVE REAL
-BASE_URL = "https://apiv2.allsportsapi.com/football/"
+from scraper import AllSportsAPI
+from ai_engine import analisar_jogo
+from ticket import gerar_bilhete, gerar_montagens_inteligentes
+import database
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-}
+st.set_page_config(page_title="⚽ FootballAI Bot", page_icon="⚽", layout="wide")
+st_autorefresh(interval=300000, key="auto_refresh")
 
-# ============================================================
-# FUNÇÕES AUXILIARES
-# ============================================================
+st.title("⚽ FootballAI Bot")
+st.caption("Dados reais da AllSportsAPI | Análise com IA simplificada | Bilhetes inteligentes")
 
-def _get(params: Dict) -> Optional[Dict]:
-    """
-    Faz GET request à API da AllSportsAPI.
-    O parâmetro 'met' e 'APIkey' são obrigatórios.
-    """
-    params["APIkey"] = API_KEY
+with st.sidebar:
+    st.header("⚙️ Configurações")
+    data_selecionada = st.date_input(
+        "Data dos jogos (Análise)",
+        value=datetime.now().date(),
+        min_value=datetime.now().date() - timedelta(days=7),
+        max_value=datetime.now().date() + timedelta(days=7),
+        key="data_analise"
+    )
+    st.divider()
+    st.info("🔄 Atualização automática a cada 5 min")
+    st.info("ℹ️ Dados via AllSportsAPI")
+
+@st.cache_data(ttl=300)
+def analisar_jogos_do_dia(date_str):
     try:
-        resp = requests.get(BASE_URL, params=params, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("success") != 1:
-            print(f"Erro da API: {data.get('message', 'sucesso=0')}")
-            return None
-        return data
-    except requests.RequestException as e:
-        print(f"Erro na requisição: {e}")
-        return None
-
-
-def _safe_get(data: Dict, *keys, default=None):
-    """Acede a chaves aninhadas com segurança."""
-    for key in keys:
-        if isinstance(data, dict) and key in data:
-            data = data[key]
-        else:
-            return default
-    return data
-
-# ============================================================
-# CLASSE PRINCIPAL
-# ============================================================
-
-class AllSportsAPI:
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
-        self.last_events = []  # cache dos eventos do dia
-
-    # ---------- JOGOS DO DIA ----------
-    def get_scheduled_events(self, date_str: str) -> List[Dict]:
-        """
-        Obtém todos os jogos agendados para uma data.
-        Formato date_str: 'YYYY-MM-DD'
-        Retorna lista de eventos com informações básicas e IDs.
-        """
-        params = {
-            "met": "Fixtures",
-            "from": date_str,
-            "to": date_str,
-            "APIkey": API_KEY,  # será sobrescrito por _get, mas mantemos
-        }
-        data = _get(params)
-        if not data:
-            self.last_events = []
+        api = AllSportsAPI()
+        jogos = api.get_scheduled_events(date_str)
+        if not jogos:
             return []
-
-        events = []
-        for fixture in _safe_get(data, "result", default=[]):
-            event_key = fixture.get("event_key")
-            home_team = fixture.get("event_home_team", "?")
-            away_team = fixture.get("event_away_team", "?")
-            tournament = fixture.get("league_name", "")
-            date_time = fixture.get("event_date", "")
-            status = fixture.get("event_status", "")
-
-            # IDs das equipas e liga (para uso posterior)
-            home_team_id = fixture.get("home_team_key")
-            away_team_id = fixture.get("away_team_key")
-            league_id = fixture.get("league_key")
-
-            # Guardar no evento
-            event = {
-                "event_id": event_key,
-                "home_team": home_team,
-                "away_team": away_team,
-                "tournament": tournament,
-                "start_time": date_time,  # já vem no formato 'YYYY-MM-DD HH:MM:SS' ou similar
-                "status": status,
-                "home_team_id": home_team_id,
-                "away_team_id": away_team_id,
-                "league_id": league_id,
-                "raw": fixture  # guardar todos os dados do fixture
-            }
-            events.append(event)
-
-        self.last_events = events
-        return events
-
-    # ---------- DETALHES DO EVENTO (a partir do cache) ----------
-    def get_event_details(self, event_id: str) -> Optional[Dict]:
-        """Retorna os detalhes do evento se estiver no cache."""
-        for ev in self.last_events:
-            if str(ev["event_id"]) == str(event_id):
-                return ev["raw"]
-        return None
-
-    # ---------- ESTATÍSTICAS (não disponível na AllSportsAPI) ----------
-    def get_event_statistics(self, event_id: str) -> Optional[Dict]:
-        """Não suportado pela AllSportsAPI. Retorna None."""
-        return None
-
-    # ---------- ESCALAÇÕES (não disponível) ----------
-    def get_event_lineups(self, event_id: str) -> Optional[Dict]:
-        """Não suportado pela AllSportsAPI. Retorna None."""
-        return None
-
-    # ---------- ODDS ----------
-    def get_event_odds(self, event_id: str) -> Optional[Dict]:
-        """
-        Obtém odds para o evento. Requer que a API forneça o endpoint Odds.
-        Formato exato depende da AllSportsAPI.
-        """
-        # Exemplo de chamada (pode necessitar de ajustes):
-        # params = {"met": "Odds", "from": data_do_evento, "to": data_do_evento}
-        # Depois filtrar por event_key.
-        # Como não sabemos a data exata, podemos tentar com data atual ±1 dia.
-        # Para simplificar, retornamos None.
-        return None
-
-    # ---------- CLASSIFICAÇÃO ----------
-    def get_tournament_standings(self, league_id: str) -> Optional[Dict]:
-        """Obtém a classificação de um torneio."""
-        params = {
-            "met": "Standings",
-            "leagueId": league_id,
-            "APIkey": API_KEY,
-        }
-        data = _get(params)
-        return data
-
-    # ---------- FORMA RECENTE ----------
-    def get_team_recent_matches(self, team_id: str, num_matches: int = 5) -> List[Dict]:
-        """
-        Busca os últimos jogos de uma equipa.
-        Usa o endpoint Fixtures com filtro por equipa e período alargado.
-        """
-        # Definir intervalo dos últimos 6 meses
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=180)
-        params = {
-            "met": "Fixtures",
-            "from": start_date.strftime("%Y-%m-%d"),
-            "to": end_date.strftime("%Y-%m-%d"),
-            "teamId": team_id,
-            "APIkey": API_KEY,
-        }
-        data = _get(params)
-        if not data:
-            return []
-
-        fixtures = _safe_get(data, "result", default=[])
-        # Ordenar por data (mais recentes primeiro) e filtrar as últimas N
-        # A API pode devolver jogos futuros também; filtrar para jogos com resultado
-        played = []
-        for fx in fixtures:
-            final_result = fx.get("event_final_result", "")
-            if final_result:  # só jogos já terminados
-                # Extrair golos
-                try:
-                    home_goals, away_goals = map(int, final_result.split("-"))
-                except:
+        resultados = []
+        for jogo in jogos:
+            try:
+                dados = api.prepare_match_data(jogo['event_id'])
+                if not dados:
                     continue
-                played.append({
-                    "golos_marcados": home_goals if str(fx.get("home_team_key")) == str(team_id) else away_goals,
-                    "golos_sofridos": away_goals if str(fx.get("home_team_key")) == str(team_id) else home_goals,
-                    "adversario": fx.get("event_away_team") if str(fx.get("home_team_key")) == str(team_id) else fx.get("event_home_team"),
-                    "data": fx.get("event_date", "")
-                })
-        # Ordenar por data decrescente (mais recente primeiro)
-        played.sort(key=lambda x: x["data"], reverse=True)
-        return played[:num_matches]
-
-    # ---------- DADOS PARA O MOTOR DE IA ----------
-    def prepare_match_data(self, event_id: str) -> Optional[Dict]:
-        """
-        Monta um dicionário no formato que o ai_engine.analisar_jogo espera.
-        Usa o cache de eventos para obter IDs e dados básicos.
-        """
-        # Encontrar o evento no cache
-        evento = None
-        for ev in self.last_events:
-            if str(ev["event_id"]) == str(event_id):
-                evento = ev
-                break
-
-        if not evento:
-            print(f"Evento {event_id} não encontrado no cache.")
-            return None
-
-        home_id = evento.get("home_team_id")
-        away_id = evento.get("away_team_id")
-        league_id = evento.get("league_id")
-
-        match_data = {
-            "event_id": event_id,
-            "home_team": evento["home_team"],
-            "away_team": evento["away_team"],
-            "data": datetime.now().strftime("%Y-%m-%d"),
-            "forma_casa": [],
-            "forma_fora": [],
-            "golos_casa": [],
-            "golos_fora": [],
-            "golos_sofridos_casa": [],
-            "golos_sofridos_fora": [],
-            "posicao_casa": None,
-            "posicao_fora": None,
-            "media_cantos_casa": 4.5,
-            "media_cantos_fora": 4.0,
-            "media_cartoes_casa": 2.0,
-            "media_cartoes_fora": 2.0,
-            "odds": {}
-        }
-
-        # Forma recente
-        if home_id:
-            try:
-                ultimos_casa = self.get_team_recent_matches(home_id, num_matches=5)
-                match_data["forma_casa"] = ultimos_casa
-                match_data["golos_casa"] = [j["golos_marcados"] for j in ultimos_casa]
-                match_data["golos_sofridos_casa"] = [j["golos_sofridos"] for j in ultimos_casa]
+                analise = analisar_jogo(dados)
+                analise['tournament'] = jogo.get('tournament', '')
+                analise['start_time'] = jogo.get('start_time', '')
+                analise['status'] = jogo.get('status', '')
+                resultados.append(analise)
             except Exception as e:
-                print(f"Erro ao buscar forma da casa: {e}")
+                st.error(f"Erro ao analisar {jogo.get('home_team')} vs {jogo.get('away_team')}: {e}")
+                continue
+        resultados.sort(key=lambda x: x['confianca_geral'], reverse=True)
+        return resultados
+    except Exception as e:
+        st.error(f"Erro geral: {e}")
+        return []
 
-        if away_id:
-            try:
-                ultimos_fora = self.get_team_recent_matches(away_id, num_matches=5)
-                match_data["forma_fora"] = ultimos_fora
-                match_data["golos_fora"] = [j["golos_marcados"] for j in ultimos_fora]
-                match_data["golos_sofridos_fora"] = [j["golos_sofridos"] for j in ultimos_fora]
-            except Exception as e:
-                print(f"Erro ao buscar forma da fora: {e}")
+date_str = data_selecionada.strftime("%Y-%m-%d")
+resultados = analisar_jogos_do_dia(date_str)
 
-        # Classificação
-        if league_id:
-            try:
-                standings = self.get_tournament_standings(league_id)
-                if standings:
-                    # Percorrer a classificação para encontrar as posições
-                    for row in _safe_get(standings, "result", default=[]):
-                        team_key = str(row.get("team_key"))
-                        position = row.get("standing_place")
-                        if team_key == str(home_id):
-                            match_data["posicao_casa"] = int(position) if position else None
-                        elif team_key == str(away_id):
-                            match_data["posicao_fora"] = int(position) if position else None
-            except Exception as e:
-                print(f"Erro ao buscar classificação: {e}")
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Análise", "🔎 Pesquisa", "🎟️ Bilhete do Dia", "💎 Montagens Inteligentes", "📜 Histórico"
+])
 
-        return match_data
-
-
-# ============================================================
-# TESTE RÁPIDO
-# ============================================================
-if __name__ == "__main__":
-    api = AllSportsAPI()
-    date_str = "2026-08-15"  # altera para uma data com jogos
-    print(f"Buscando jogos de {date_str}...")
-    events = api.get_scheduled_events(date_str)
-    if not events:
-        print("Nenhum jogo encontrado.")
+with tab1:
+    st.subheader(f"Jogos de {date_str} (total: {len(resultados)})")
+    if not resultados:
+        st.warning("Nenhum jogo encontrado ou erro na recolha de dados.")
     else:
-        print(f"Encontrados {len(events)} jogos.")
-        for ev in events[:5]:
-            print(f"- {ev['home_team']} vs {ev['away_team']} ({ev['tournament']}) ID: {ev['event_id']}")
-        if events:
-            first_id = events[0]['event_id']
-            print(f"\nPreparando dados do evento {first_id}...")
-            data = api.prepare_match_data(first_id)
-            if data:
-                print(json.dumps(data, indent=2))
+        for r in resultados:
+            for p in r['previsoes']:
+                database.salvar_previsao(
+                    data_jogo=date_str,
+                    jogo=f"{r['home_team']} vs {r['away_team']}",
+                    mercado=p['mercado'],
+                    selecao=p['selecao'],
+                    probabilidade=p['probabilidade'],
+                    odd=p.get('odd'),
+                    pontuacao=p['pontuacao'],
+                    confianca_jogo=r['confianca_geral']
+                )
+        rows = []
+        for r in resultados:
+            top3 = r['previsoes'][:3]
+            texto_top = " | ".join([f"{p['mercado']}: {p['selecao']} ({p['probabilidade']:.0%})" for p in top3])
+            rows.append({
+                "Jogo": f"{r['home_team']} vs {r['away_team']}",
+                "Torneio": r.get('tournament', ''),
+                "Hora": r.get('start_time', ''),
+                "xG Casa": r['xg_casa'],
+                "xG Fora": r['xg_fora'],
+                "Confiança": f"{r['confianca_geral']}%",
+                "Top 3 Palpites": texto_top
+            })
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.divider()
+        for r in resultados:
+            with st.expander(f"⚽ {r['home_team']} vs {r['away_team']} (Confiança: {r['confianca_geral']}%)"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**Torneio:** {r.get('tournament', 'N/A')}")
+                    st.markdown(f"**Hora:** {r.get('start_time', 'N/A')}")
+                    st.markdown(f"**xG Casa:** {r['xg_casa']}")
+                    st.markdown(f"**xG Fora:** {r['xg_fora']}")
+                with col2:
+                    st.markdown("**Palpites:**")
+                    for p in r['previsoes']:
+                        odd_text = f" (Odd: {p['odd']})" if p.get('odd') else ""
+                        st.markdown(f"- {p['mercado']}: **{p['selecao']}** ({p['probabilidade']:.0%}){odd_text} | Pontuação: {p['pontuacao']:.1f}")
+
+with tab2:
+    st.subheader("🔎 Pesquisar Jogo")
+    col_search1, col_search2 = st.columns(2)
+    with col_search1:
+        equipa_casa = st.text_input("Equipa da Casa", placeholder="Ex: Barcelona", key="equipa_casa")
+    with col_search2:
+        equipa_fora = st.text_input("Equipa de Fora", placeholder="Ex: Real Madrid", key="equipa_fora")
+    data_pesquisa = st.date_input("Data do jogo", value=datetime.now().date(),
+                                  min_value=datetime.now().date() - timedelta(days=7),
+                                  max_value=datetime.now().date() + timedelta(days=7),
+                                  key="data_pesquisa")
+    pesquisar = st.button("Pesquisar Jogo", type="primary", key="btn_pesquisar")
+    if pesquisar:
+        if not equipa_casa or not equipa_fora:
+            st.warning("⚠️ Indica o nome das duas equipas.")
+        else:
+            with st.spinner("A pesquisar jogo..."):
+                api = AllSportsAPI()
+                eventos = api.get_scheduled_events(data_pesquisa.strftime("%Y-%m-%d"))
+                if not eventos:
+                    st.warning("Nenhum evento encontrado para essa data.")
+                else:
+                    evento_encontrado = None
+                    for ev in eventos:
+                        if equipa_casa.lower() in ev['home_team'].lower() and equipa_fora.lower() in ev['away_team'].lower():
+                            evento_encontrado = ev
+                            break
+                    if not evento_encontrado:
+                        st.warning("❌ Jogo não encontrado.")
+                    else:
+                        st.success(f"✅ Jogo encontrado: {evento_encontrado['home_team']} vs {evento_encontrado['away_team']}")
+                        dados = api.prepare_match_data(evento_encontrado['event_id'])
+                        if not dados:
+                            st.error("Não foi possível obter dados detalhados.")
+                        else:
+                            analise = analisar_jogo(dados)
+                            col_xg1, col_xg2 = st.columns(2)
+                            with col_xg1:
+                                st.metric("xG Casa", f"{analise['xg_casa']:.2f}")
+                            with col_xg2:
+                                st.metric("xG Fora", f"{analise['xg_fora']:.2f}")
+                            st.markdown("---")
+                            st.markdown("### 📊 Probabilidades Calculadas")
+                            for p in analise['previsoes']:
+                                prob = min(float(p['probabilidade']), 1.0)
+                                odd_text = f" | Odd: {p['odd']}" if p.get('odd') else ""
+                                st.markdown(f"**{p['mercado']}**: {p['selecao']} → {p['probabilidade']:.0%}{odd_text}")
+                                st.progress(prob)
+                            melhor = analise['previsoes'][0]
+                            st.success(f"💡 **Melhor mercado sugerido:** {melhor['mercado']} - {melhor['selecao']} ({melhor['probabilidade']:.0%}) | Pontuação: {melhor['pontuacao']:.1f}")
+
+with tab3:
+    st.subheader("🎟️ Bilhete do Dia (Normal)")
+    bilhete_normal = gerar_bilhete(resultados) if resultados else None
+    if bilhete_normal:
+        database.salvar_bilhete(date_str, bilhete_normal['selecoes'], bilhete_normal.get('odd_total'), bilhete_normal['confianca_media'], tipo="normal")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            for sel in bilhete_normal['selecoes']:
+                odd_text = f" (Odd: {sel['odd']})" if sel.get('odd') else ""
+                st.markdown(f"**{sel['jogo']}** → {sel['mercado']}: {sel['selecao']} ({sel['probabilidade']:.0%}){odd_text}")
+        with col2:
+            st.metric("Confiança Média", f"{bilhete_normal['confianca_media']}%")
+            if bilhete_normal.get('odd_total'):
+                st.metric("Odd Total", f"{bilhete_normal['odd_total']:.2f}")
+            else:
+                st.info("Sem odds disponíveis")
+    else:
+        st.info("Não foi possível gerar um bilhete. Verifica se há jogos analisados.")
+
+with tab4:
+    st.subheader("💎 Montagens Inteligentes")
+    montagens = gerar_montagens_inteligentes(resultados) if resultados else []
+    if montagens:
+        for m in montagens:
+            database.salvar_bilhete(date_str, m['selecoes'], m.get('odd_total'), m['confianca_media'], tipo=m['nome'])
+            with st.expander(f"{m['nome']} ({m['num_selecoes']} seleções, conf. média {m['confianca_media']}%)"):
+                for sel in m['selecoes']:
+                    odd_text = f" (Odd: {sel['odd']})" if sel.get('odd') else ""
+                    st.markdown(f"- {sel['jogo']} | {sel['mercado']}: {sel['selecao']} ({sel['probabilidade']:.0%}){odd_text}")
+                if m.get('odd_total'):
+                    st.markdown(f"**Odd Total:** {m['odd_total']:.2f}")
+                else:
+                    st.markdown("**Odd Total:** indisponível")
+    else:
+        st.info("Sem montagens disponíveis com os critérios atuais.")
+
+with tab5:
+    st.subheader("📜 Histórico de Previsões e Bilhetes")
+    col_prev, col_bil = st.columns(2)
+    with col_prev:
+        st.markdown("### Previsões Recentes")
+        previsoes = database.listar_previsoes(limit=50)
+        if previsoes:
+            df_prev = pd.DataFrame(previsoes)
+            st.dataframe(df_prev, use_container_width=True, hide_index=True)
+        else:
+            st.info("Sem previsões guardadas.")
+    with col_bil:
+        st.markdown("### Bilhetes Gerados")
+        bilhetes = database.listar_bilhetes(limit=20)
+        if bilhetes:
+            for b in bilhetes:
+                with st.expander(f"{b['tipo']} - {b['data_bilhete']} (Conf: {b['confianca_media']}%)"):
+                    st.markdown(f"**Status:** {b['status']}")
+                    selecoes = json.loads(b['selecoes']) if isinstance(b['selecoes'], str) else b['selecoes']
+                    for sel in selecoes:
+                        st.markdown(f"- {sel['jogo']} | {sel['mercado']}: {sel['selecao']}")
+                    opcoes_status = ["pendente", "ganho", "perdido"]
+                    indice_atual = opcoes_status.index(b['status']) if b['status'] in opcoes_status else 0
+                    novo_status = st.selectbox("Atualizar status", options=opcoes_status, index=indice_atual, key=f"status_{b['id']}")
+                    if novo_status != b['status'] and st.button("Salvar", key=f"save_{b['id']}"):
+                        database.atualizar_status_bilhete(b['id'], novo_status)
+                        st.success("Status atualizado!")
+                        st.rerun()
+        else:
+            st.info("Sem bilhetes guardados.")
